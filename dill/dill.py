@@ -145,19 +145,8 @@ PartialType = type(partial(int,base=2))
 SuperType = type(super(Exception, TypeError()))
 ItemGetterType = type(itemgetter(0))
 AttrGetterType = type(attrgetter('__repr__'))
-FileType = type(open(os.devnull, 'rb', buffering=0))
-TextWrapperType = type(open(os.devnull, 'r', buffering=-1))
-BufferedRandomType = type(open(os.devnull, 'r+b', buffering=-1))
-BufferedReaderType = type(open(os.devnull, 'rb', buffering=-1))
-BufferedWriterType = type(open(os.devnull, 'wb', buffering=-1))
-try:
-    from _pyio import open as _open
-    PyTextWrapperType = type(_open(os.devnull, 'r', buffering=-1))
-    PyBufferedRandomType = type(_open(os.devnull, 'r+b', buffering=-1))
-    PyBufferedReaderType = type(_open(os.devnull, 'rb', buffering=-1))
-    PyBufferedWriterType = type(_open(os.devnull, 'wb', buffering=-1))
-except ImportError:
-    PyTextWrapperType = PyBufferedRandomType = PyBufferedReaderType = PyBufferedWriterType = None
+FileType = TextWrapperType = BufferedRandomType = BufferedReaderType = BufferedWriterType = None
+PyTextWrapperType = PyBufferedRandomType = PyBufferedReaderType = PyBufferedWriterType = None
 try:
     from cStringIO import StringIO, InputType, OutputType
 except ImportError:
