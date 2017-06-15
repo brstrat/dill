@@ -8,12 +8,8 @@
 from __future__ import absolute_import
 
 # get version numbers, license, and long description
-try:
-    from .info import this_version as __version__
-    from .info import readme as __doc__, license as __license__
-except ImportError:
-    msg = """First run 'python setup.py build' to build dill."""
-    raise ImportError(msg)
+from .info import this_version as __version__
+from .info import readme as __doc__, license as __license__
 
 __author__ = 'Mike McKerns'
 
