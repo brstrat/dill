@@ -2,6 +2,7 @@
 #
 # Author: Mike McKerns (mmckerns @caltech and @uqfoundation)
 # Copyright (c) 2008-2015 California Institute of Technology.
+# Copyright (c) 2016-2017 The Uncertainty Quantification Foundation.
 # License: 3-clause BSD.  The full license text is available at:
 #  - http://trac.mystic.cacr.caltech.edu/project/pathos/browser/dill/LICENSE
 """
@@ -37,7 +38,7 @@ _use_diff = False
 PY3 = (sys.hexversion >= 0x30000f0)
 if PY3: #XXX: get types from .objtypes ?
     import builtins as __builtin__
-    from pickle import _Pickler as StockPickler, _Unpickler as StockUnpickler
+    from pickle import _Pickler as StockPickler, Unpickler as StockUnpickler
     from _thread import LockType
    #from io import IOBase
     from types import CodeType, FunctionType, MethodType, GeneratorType, \
@@ -76,16 +77,14 @@ import gc
 from weakref import ReferenceType, ProxyType, CallableProxyType
 from functools import partial
 from operator import itemgetter, attrgetter
-# new in python2.5
-if sys.hexversion >= 0x20500f0:
-    from types import MemberDescriptorType, GetSetDescriptorType
 # new in python3.3
 if sys.hexversion < 0x03030000:
     FileNotFoundError = IOError
 try:
     import ctypes
     HAS_CTYPES = True
-    IS_PYPY = True
+    # if using `pypy`, pythonapi is not found
+    IS_PYPY = not hasattr(ctypes, 'pythonapi')
 except ImportError:
     HAS_CTYPES = False
     IS_PYPY = False
@@ -138,13 +137,31 @@ else:
     def ndarraysubclassinstance(obj): return False
     def numpyufunc(obj): return False
 
-# make sure to add these 'hand-built' types to _typemap
 if PY3:
-    CellType = type((lambda x: lambda y: x)(0).__closure__[0])
+    def _create_cell(contents):
+        return (lambda: contents).__closure__[0]
 else:
     CellType = type((lambda x: lambda y: x)(0).func_closure[0])
-WrapperDescriptorType = type(type.__repr__)
-MethodDescriptorType = type(type.__dict__['mro'])
+# new in python2.5
+if sys.hexversion >= 0x20500f0:
+    from types import GetSetDescriptorType
+    if not IS_PYPY:
+        from types import MemberDescriptorType
+    else:
+        # oddly, MemberDescriptorType is GetSetDescriptorType
+        # while, member_descriptor does exist otherwise... is this a pypy bug?
+        class _member(object):
+            __slots__ = ['descriptor']
+        MemberDescriptorType = type(_member.descriptor)
+if IS_PYPY:
+    WrapperDescriptorType = MethodType
+    MethodDescriptorType = FunctionType
+    ClassMethodDescriptorType = FunctionType
+else:
+    WrapperDescriptorType = type(type.__repr__)
+    MethodDescriptorType = type(type.__dict__['mro'])
+    ClassMethodDescriptorType = type(type.__dict__['__prepare__' if PY3 else 'mro'])
+
 MethodWrapperType = type([].__repr__)
 PartialType = type(partial(int,base=2))
 SuperType = type(super(Exception, TypeError()))
@@ -222,7 +239,7 @@ def dump(obj, file, protocol=None, byref=None, fmode=None, recurse=None):#, stri
             log.info("Nu: (%s, %s)" % (obj.shape,obj.dtype))
             npdict = getattr(obj, '__dict__', None)
             f, args, state = obj.__reduce__()
-            pik.save_reduce(_create_array, (f, args, state, npdict), obj=obj)
+            pickler.save_reduce(_create_array, (f,args,state,npdict), obj=obj)
             log.info("# Nu")
             return
     # end hack
@@ -241,9 +258,10 @@ def load(file):
     pik = Unpickler(file)
     pik._main = _main_module
     obj = pik.load()
-    if type(obj).__module__ == _main_module.__name__: # point obj class to main
-        try: obj.__class__ == getattr(pik._main, type(obj).__name__)
-        except AttributeError: pass # defined in a file
+    if type(obj).__module__ == getattr(_main_module, '__name__', '__main__'):
+        # point obj class to main
+        try: obj.__class__ = getattr(pik._main, type(obj).__name__)
+        except (AttributeError,TypeError): pass # defined in a file
    #_main_module.__dict__.update(obj.__dict__) #XXX: should update globals ?
     return obj
 
@@ -462,8 +480,6 @@ def _create_typemap():
 _reverse_typemap = dict(_create_typemap())
 _reverse_typemap.update({
     'CellType': CellType,
-    'WrapperDescriptorType': WrapperDescriptorType,
-    'MethodDescriptorType': MethodDescriptorType,
     'MethodWrapperType': MethodWrapperType,
     'PartialType': PartialType,
     'SuperType': SuperType,
@@ -484,6 +500,12 @@ if ExitType:
 if InputType:
     _reverse_typemap['InputType'] = InputType
     _reverse_typemap['OutputType'] = OutputType
+if not IS_PYPY:
+    _reverse_typemap['WrapperDescriptorType'] = WrapperDescriptorType
+    _reverse_typemap['MethodDescriptorType'] = MethodDescriptorType
+    _reverse_typemap['ClassMethodDescriptorType'] = ClassMethodDescriptorType
+else:
+    _reverse_typemap['MemberDescriptorType'] = MemberDescriptorType
 if PY3:
     _typemap = dict((v, k) for k, v in _reverse_typemap.items())
 else:
@@ -503,7 +525,7 @@ def _create_function(fcode, fglobals, fname=None, fdefaults=None, \
     # same as FunctionType, but enable passing __dict__ to new function,
     # __dict__ is the storehouse for attributes added after function creation
     if fdict is None: fdict = dict()
-    func = FunctionType(fcode, fglobals, fname, fdefaults, fclosure)
+    func = FunctionType(fcode, fglobals or dict(), fname, fdefaults, fclosure)
     func.__dict__.update(fdict) #XXX: better copy? option to copy?
     return func
 
@@ -599,6 +621,8 @@ def _create_filehandle(name, mode, position, closed, open, strictio, fmode, fdat
                             ("ob_refcnt", ctypes.c_int),
                             ("ob_type", ctypes.py_object)
                             ]
+                    #FIXME: CONTENTS_FMODE fails for pypy due to issue #1233
+                    #       https://bitbucket.org/pypy/pypy/issues/1233
                     ctypes.cast(id(f), ctypes.POINTER(FILE)).contents.name = name
                     ctypes.cast(id(name), ctypes.POINTER(PyObject)).contents.ob_refcnt += 1
                 assert f.name == name
@@ -648,16 +672,12 @@ class _attrgetter_helper(object):
             attrs[index] = ".".join([attrs[index], attr])
         return type(self)(attrs, index)
 
-if HAS_CTYPES and IS_PYPY:
-    try: # if using `pypi`, pythonapi is not found
-        ctypes.pythonapi.PyCell_New.restype = ctypes.py_object
-        ctypes.pythonapi.PyCell_New.argtypes = [ctypes.py_object]
-        # thanks to Paul Kienzle for cleaning the ctypes CellType logic
-        def _create_cell(contents):
-            return ctypes.pythonapi.PyCell_New(contents)
-
-    except AttributeError:
-        IS_PYPY = False
+if PY3:
+    def _create_cell(contents):
+        return (lambda y: contents).__closure__[0]
+else:
+    def _create_cell(contents):
+        return (lambda y: contents).func_closure[0]
 
 def _create_weakref(obj, *args):
     from weakref import ref
@@ -691,15 +711,32 @@ def _create_array(f, args, state, npdict=None):
         array.__dict__.update(npdict)
     return array
 
+def _create_namedtuple(name, fieldnames, modulename):
+    mod = _import_module(modulename, safe=True)
+    if mod is not None:
+        try:
+            return getattr(mod, name)
+        except:
+            pass
+    import collections
+    t = collections.namedtuple(name, fieldnames)
+    t.__module__ = modulename
+    return t
+
 def _getattr(objclass, name, repr_str):
     # hack to grab the reference directly
     try: #XXX: works only for __builtin__ ?
         attr = repr_str.split("'")[3]
         return eval(attr+'.__dict__["'+name+'"]')
     except:
-        attr = getattr(objclass,name)
-        if name == '__dict__':
-            attr = attr[name]
+        try:
+            attr = objclass.__dict__
+            if type(attr) is DictProxyType:
+                attr = attr[name]
+            else:
+                attr = getattr(objclass,name)
+        except:
+            attr = getattr(objclass,name)
         return attr
 
 def _get_attr(self, name):
@@ -710,6 +747,7 @@ def _dict_from_dictproxy(dictproxy):
     _dict = dictproxy.copy() # convert dictproxy to dict
     _dict.pop('__dict__', None)
     _dict.pop('__weakref__', None)
+    _dict.pop('__prepare__', None)
     return _dict
 
 def _import_module(import_name, safe=False):
@@ -764,42 +802,6 @@ def save_code(pickler, obj):
     log.info("# Co")
     return
 
-@register(FunctionType)
-def save_function(pickler, obj):
-    if not _locate_function(obj): #, pickler._session):
-        log.info("F1: %s" % obj)
-        if getattr(pickler, '_recurse', False):
-            # recurse to get all globals referred to by obj
-            from .detect import globalvars
-            globs = globalvars(obj, recurse=True, builtin=True)
-            # remove objects that have already been serialized
-           #stacktypes = (ClassType, TypeType, FunctionType)
-           #for key,value in list(globs.items()):
-           #    if isinstance(value, stacktypes) and value in stack:
-           #        del globs[key]
-            # ABORT: if self-references, use _recurse=False
-            if obj in globs.values(): # or obj in stack:
-                globs = obj.__globals__ if PY3 else obj.func_globals
-        else:
-            globs = obj.__globals__ if PY3 else obj.func_globals
-       #stack.add(obj)
-        if PY3:
-            pickler.save_reduce(_create_function, (obj.__code__,
-                                globs, obj.__name__,
-                                obj.__defaults__, obj.__closure__,
-                                obj.__dict__), obj=obj)
-        else:
-            pickler.save_reduce(_create_function, (obj.func_code,
-                                globs, obj.func_name,
-                                obj.func_defaults, obj.func_closure,
-                                obj.__dict__), obj=obj)
-        log.info("# F1")
-    else:
-        log.info("F2: %s" % obj)
-        StockPickler.save_global(pickler, obj) #NOTE: also takes name=...
-        log.info("# F2")
-    return
-
 @register(dict)
 def save_module_dict(pickler, obj):
     if is_dill(pickler) and obj == pickler._main.__dict__ and not pickler._session:
@@ -817,6 +819,7 @@ def save_module_dict(pickler, obj):
             pickler.write('c__main__\n__dict__\n')   #XXX: works in general?
         log.info("# D3")
     elif '__name__' in obj and obj != _main_module.__dict__ \
+    and type(obj['__name__']) is str \
     and obj is getattr(_import_module(obj['__name__'],True), '__dict__', None):
         log.info("D4: <dict%s" % str(obj.__repr__).split('dict')[-1]) # obj
         if PY3:
@@ -961,7 +964,7 @@ def save_functor(pickler, obj):
     return
 
 @register(SuperType)
-def save_functor(pickler, obj):
+def save_super(pickler, obj):
     log.info("Su: %s" % obj)
     pickler.save_reduce(super, (obj.__thisclass__, obj.__self__), obj=obj)
     log.info("# Su")
@@ -1003,16 +1006,27 @@ def save_instancemethod0(pickler, obj):# example: cStringIO.StringI
     return
 
 if sys.hexversion >= 0x20500f0:
-    @register(MemberDescriptorType)
-    @register(GetSetDescriptorType)
-    @register(MethodDescriptorType)
-    @register(WrapperDescriptorType)
-    def save_wrapper_descriptor(pickler, obj):
-        log.info("Wr: %s" % obj)
-        pickler.save_reduce(_getattr, (obj.__objclass__, obj.__name__,
-                                       obj.__repr__()), obj=obj)
-        log.info("# Wr")
-        return
+    if not IS_PYPY:
+        @register(MemberDescriptorType)
+        @register(GetSetDescriptorType)
+        @register(MethodDescriptorType)
+        @register(WrapperDescriptorType)
+        @register(ClassMethodDescriptorType)
+        def save_wrapper_descriptor(pickler, obj):
+            log.info("Wr: %s" % obj)
+            pickler.save_reduce(_getattr, (obj.__objclass__, obj.__name__,
+                                           obj.__repr__()), obj=obj)
+            log.info("# Wr")
+            return
+    else:
+        @register(MemberDescriptorType)
+        @register(GetSetDescriptorType)
+        def save_wrapper_descriptor(pickler, obj):
+            log.info("Wr: %s" % obj)
+            pickler.save_reduce(_getattr, (obj.__objclass__, obj.__name__,
+                                           obj.__repr__()), obj=obj)
+            log.info("# Wr")
+            return
 
     @register(MethodWrapperType)
     def save_instancemethod(pickler, obj):
@@ -1020,7 +1034,8 @@ if sys.hexversion >= 0x20500f0:
         pickler.save_reduce(getattr, (obj.__self__, obj.__name__), obj=obj)
         log.info("# Mw")
         return
-else:
+
+elif not IS_PYPY:
     @register(MethodDescriptorType)
     @register(WrapperDescriptorType)
     def save_wrapper_descriptor(pickler, obj):
@@ -1030,18 +1045,17 @@ else:
         log.info("# Wr")
         return
 
-if HAS_CTYPES and IS_PYPY:
-    @register(CellType)
-    def save_cell(pickler, obj):
-        log.info("Ce: %s" % obj)
-        pickler.save_reduce(_create_cell, (obj.cell_contents,), obj=obj)
-        log.info("# Ce")
-        return
+@register(CellType)
+def save_cell(pickler, obj):
+    log.info("Ce: %s" % obj)
+    pickler.save_reduce(_create_cell, (obj.cell_contents,), obj=obj)
+    log.info("# Ce")
+    return
 
 # The following function is based on 'saveDictProxy' from spickle
 # Copyright (c) 2011 by science+computing ag
 # License: http://www.apache.org/licenses/LICENSE-2.0
-if IS_PYPY:
+if not IS_PYPY:
     @register(DictProxyType)
     def save_dictproxy(pickler, obj):
         log.info("Dp: %s" % obj)
@@ -1053,7 +1067,6 @@ if IS_PYPY:
             log.info("# Dp")
             return
         # all bad below... so throw ReferenceError or TypeError
-        from weakref import ReferenceError
         raise ReferenceError("%s does not reference a class __dict__" % obj)
 
 @register(SliceType)
@@ -1074,10 +1087,23 @@ def save_singleton(pickler, obj):
 
 def _proxy_helper(obj): # a dead proxy returns a reference to None
     """get memory address of proxy's reference object"""
-    try: #FIXME: has to be a smarter way to identify if it's a proxy
-        address = int(repr(obj).rstrip('>').split(' at ')[-1], base=16)
-    except ValueError: # has a repr... is thus probably not a proxy
-        address = id(obj)
+    _repr = repr(obj)
+    try: _str = str(obj)
+    except ReferenceError: # it's a dead proxy
+        return id(None)
+    if _str == _repr: return id(obj) # it's a repr
+    try: # either way, it's a proxy from here
+        address = int(_str.rstrip('>').split(' at ')[-1], base=16)
+    except ValueError: # special case: proxy of a 'type'
+        if not IS_PYPY:
+            address = int(_repr.rstrip('>').split(' at ')[-1], base=16)
+        else:
+            objects = iter(gc.get_objects())
+            for _obj in objects:
+                if repr(_obj) == _str: return id(_obj)
+            # all bad below... nothing found so throw ReferenceError
+            msg = "Cannot reference object for proxy at '%s'" % id(obj)
+            raise ReferenceError(msg)
     return address
 
 def _locate_object(address, module=None):
@@ -1094,7 +1120,6 @@ def _locate_object(address, module=None):
     for obj in objects:
         if address == id(obj): return obj
     # all bad below... nothing found so throw ReferenceError or TypeError
-    from weakref import ReferenceError
     try: address = hex(address)
     except TypeError:
         raise TypeError("'%s' is not a valid memory address" % str(address))
@@ -1146,12 +1171,12 @@ def save_module(pickler, obj):
         pickler.save_reduce(_import_module, (obj.__name__,), obj=obj)
         log.info("# M2")
     else:
-        # if a module file name starts with prefx, it should be a builtin
+        # if a module file name starts with prefix, it should be a builtin
         # module, so should be pickled as a reference
         if hasattr(obj, "__file__"):
             names = ["base_prefix", "base_exec_prefix", "exec_prefix",
                      "prefix", "real_prefix"]
-            builtin_mod = any([obj.__file__.startswith(getattr(sys, name))
+            builtin_mod = any([obj.__file__.startswith(os.path.normpath(getattr(sys, name)))
                            for name in names if hasattr(sys, name)])
             builtin_mod = builtin_mod or 'site-packages' in obj.__file__
         else:
@@ -1179,15 +1204,13 @@ def save_type(pickler, obj):
         log.info("T1: %s" % obj)
         pickler.save_reduce(_load_type, (_typemap[obj],), obj=obj)
         log.info("# T1")
+    elif issubclass(obj, tuple) and all([hasattr(obj, attr) for attr in ('_fields','_asdict','_make','_replace')]):
+        # special case: namedtuples
+        log.info("T6: %s" % obj)
+        pickler.save_reduce(_create_namedtuple, (getattr(obj, "__qualname__", obj.__name__), obj._fields, obj.__module__), obj=obj)
+        log.info("# T6")
+        return
     elif obj.__module__ == '__main__':
-        try: # use StockPickler for special cases [namedtuple,]
-            [getattr(obj, attr) for attr in ('_fields','_asdict',
-                                             '_make','_replace')]
-            log.info("T6: %s" % obj)
-            StockPickler.save_global(pickler, obj)
-            log.info("# T6")
-            return
-        except AttributeError: pass
         if issubclass(type(obj), type):
         #   try: # used when pickling the class as code (or the interpreter)
             if is_dill(pickler) and not pickler._byref:
@@ -1208,6 +1231,8 @@ def save_type(pickler, obj):
        #print (_dict)
        #print ("%s\n%s" % (type(obj), obj.__name__))
        #print ("%s\n%s" % (obj.__bases__, obj.__dict__))
+        for name in _dict.get("__slots__", []):
+            del _dict[name]
         pickler.save_reduce(_create_type, (type(obj), obj.__name__,
                                            obj.__bases__, _dict), obj=obj)
         log.info("# %s" % _t)
@@ -1248,6 +1273,42 @@ def save_classmethod(pickler, obj):
             orig_func = getattr(orig_func, im_func) # Unbind
     pickler.save_reduce(type(obj), (orig_func,), obj=obj)
     log.info("# Cm")
+
+@register(FunctionType)
+def save_function(pickler, obj):
+    if not _locate_function(obj): #, pickler._session):
+        log.info("F1: %s" % obj)
+        if getattr(pickler, '_recurse', False):
+            # recurse to get all globals referred to by obj
+            from .detect import globalvars
+            globs = globalvars(obj, recurse=True, builtin=True)
+            # remove objects that have already been serialized
+           #stacktypes = (ClassType, TypeType, FunctionType)
+           #for key,value in list(globs.items()):
+           #    if isinstance(value, stacktypes) and value in stack:
+           #        del globs[key]
+            # ABORT: if self-references, use _recurse=False
+            if obj in globs.values(): # or obj in stack:
+                globs = obj.__globals__ if PY3 else obj.func_globals
+        else:
+            globs = obj.__globals__ if PY3 else obj.func_globals
+       #stack.add(obj)
+        if PY3:
+            pickler.save_reduce(_create_function, (obj.__code__,
+                                globs, obj.__name__,
+                                obj.__defaults__, obj.__closure__,
+                                obj.__dict__), obj=obj)
+        else:
+            pickler.save_reduce(_create_function, (obj.func_code,
+                                globs, obj.func_name,
+                                obj.func_defaults, obj.func_closure,
+                                obj.__dict__), obj=obj)
+        log.info("# F1")
+    else:
+        log.info("F2: %s" % obj)
+        StockPickler.save_global(pickler, obj) #NOTE: also takes name=...
+        log.info("# F2")
+    return
 
 # quick sanity checking
 def pickles(obj,exact=False,safe=False,**kwds):

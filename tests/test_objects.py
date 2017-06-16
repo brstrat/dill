@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 #
 # Author: Mike McKerns (mmckerns @caltech and @uqfoundation)
-# Copyright (c) 2008-2015 California Institute of Technology.
+# Copyright (c) 2008-2016 California Institute of Technology.
+# Copyright (c) 2016-2017 The Uncertainty Quantification Foundation.
 # License: 3-clause BSD.  The full license text is available at:
 #  - http://trac.mystic.cacr.caltech.edu/project/pathos/browser/dill/LICENSE
 """
@@ -15,15 +16,18 @@ pickle.settings['recurse'] = True
 #import pickle
 
 # get all objects for testing
-from dill import load_types, objects
+from dill import load_types, objects, extend
 load_types(pickleable=True,unpickleable=False)
-#load_types(pickleable=True,unpickleable=True)
+
+# uncomment the next two lines to test cloudpickle
+#extend(False)
+#import cloudpickle as pickle
 
 # helper objects
 class _class:
     def _method(self):
         pass
-        
+
 # objects that *fail* if imported
 special = {}
 special['LambdaType'] = _lambda = lambda x: lambda y: x
@@ -46,14 +50,13 @@ def pickles(name, exact=False):
             assert type(obj) == type(pik)
     except Exception:
         print ("fails: %s %s" % (name, type(obj)))
-    return
 
 
-if __name__ == '__main__':
-
+def test_objects():
     for member in objects.keys():
        #pickles(member, exact=True)
         pickles(member, exact=False)
 
 
-# EOF
+if __name__ == '__main__':
+    test_objects()

@@ -1,19 +1,16 @@
 #!/usr/bin/env python
 #
 # Author: Mike McKerns (mmckerns @caltech and @uqfoundation)
-# Copyright (c) 2008-2015 California Institute of Technology.
+# Copyright (c) 2008-2016 California Institute of Technology.
+# Copyright (c) 2016-2017 The Uncertainty Quantification Foundation.
 # License: 3-clause BSD.  The full license text is available at:
 #  - http://trac.mystic.cacr.caltech.edu/project/pathos/browser/dill/LICENSE
 
 from __future__ import absolute_import
 
 # get version numbers, license, and long description
-try:
-    from .info import this_version as __version__
-    from .info import readme as __doc__, license as __license__
-except ImportError:
-    msg = """First run 'python setup.py build' to build dill."""
-    raise ImportError(msg)
+from .info import this_version as __version__
+from .info import readme as __doc__, license as __license__
 
 __author__ = 'Mike McKerns'
 
@@ -93,7 +90,7 @@ def license():
 
 def citation():
     """print citation"""
-    print (__doc__[-499:-140])
+    print (__doc__[-501:-123])
     return
 
 del absolute_import
